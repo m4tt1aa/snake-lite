@@ -1,0 +1,331 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>Snake Lite</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --grid: #1c2029;
+    --text: #e8eaf0;
+    --muted: #8a90a0;
+    --snake: #4ade80;
+    --snake-head: #86efac;
+    --food: #f472b6;
+    --accent: #facc15;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+    touch-action: none;
+    user-select: none;
+  }
+  .wrap { width: min(92vmin, 560px); }
+  header {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    margin-bottom: 10px;
+  }
+  h1 { font-size: 1.25rem; margin: 0; letter-spacing: .02em; }
+  .scores { display: flex; gap: 18px; font-variant-numeric: tabular-nums; }
+  .scores span { color: var(--muted); font-size: .8rem; margin-right: 4px; }
+  .scores b { font-size: 1.1rem; }
+  .board { position: relative; }
+  canvas {
+    display: block;
+    width: 100%;
+    aspect-ratio: 1;
+    background: var(--panel);
+    border-radius: 14px;
+  }
+  .overlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    background: rgba(15, 17, 21, .72);
+    border-radius: 14px;
+    text-align: center;
+    transition: opacity .2s;
+  }
+  .overlay.hidden { opacity: 0; pointer-events: none; }
+  .overlay h2 { margin: 0; font-size: 1.8rem; }
+  .overlay p { margin: 0; color: var(--muted); }
+  button {
+    margin-top: 6px;
+    font: inherit;
+    font-weight: 600;
+    padding: 10px 22px;
+    border: 0;
+    border-radius: 999px;
+    background: var(--snake);
+    color: #06210f;
+    cursor: pointer;
+  }
+  button:hover { filter: brightness(1.1); }
+  .hint { margin-top: 10px; color: var(--muted); font-size: .8rem; text-align: center; }
+  .new-best { color: var(--accent); font-weight: 600; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>🐍 Snake Lite</h1>
+    <div class="scores">
+      <div><span>Score</span><b id="score">0</b></div>
+      <div><span>Best</span><b id="best">0</b></div>
+    </div>
+  </header>
+  <div class="board">
+    <canvas id="c"></canvas>
+    <div class="overlay" id="overlay">
+      <h2 id="title">Snake Lite</h2>
+      <p id="msg">Eat the pink dots. Don't bite yourself or hit the walls.</p>
+      <button id="play">Play</button>
+    </div>
+  </div>
+  <div class="hint">Arrow keys / WASD or swipe to steer · Space to pause</div>
+</div>
+
+<script>
+(() => {
+  const GRID = 20;              // cells per side
+  const START_STEP = 140;       // ms per move at the start
+  const MIN_STEP = 60;          // speed cap
+  const SPEEDUP = 4;            // ms faster per food eaten
+
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+  const scoreEl = document.getElementById('score');
+  const bestEl = document.getElementById('best');
+  const overlay = document.getElementById('overlay');
+  const titleEl = document.getElementById('title');
+  const msgEl = document.getElementById('msg');
+  const playBtn = document.getElementById('play');
+
+  const css = getComputedStyle(document.documentElement);
+  const color = name => css.getPropertyValue(name).trim();
+  const C = {
+    grid: color('--grid'), snake: color('--snake'),
+    head: color('--snake-head'), food: color('--food'),
+  };
+
+  let best = 0;
+  try { best = +localStorage.getItem('snake-lite-best') || 0; } catch {}
+  bestEl.textContent = best;
+
+  let snake, prevSnake, dir, queue, food, score, step, state, acc, last, eatPulse;
+
+  function reset() {
+    const mid = GRID >> 1;
+    snake = [{x: mid, y: mid}, {x: mid - 1, y: mid}, {x: mid - 2, y: mid}];
+    prevSnake = snake.map(p => ({...p}));
+    dir = {x: 1, y: 0};
+    queue = [];
+    score = 0;
+    step = START_STEP;
+    acc = 0;
+    eatPulse = 0;
+    scoreEl.textContent = 0;
+    placeFood();
+  }
+
+  function placeFood() {
+    const free = [];
+    for (let x = 0; x < GRID; x++)
+      for (let y = 0; y < GRID; y++)
+        if (!snake.some(s => s.x === x && s.y === y)) free.push({x, y});
+    food = free[Math.floor(Math.random() * free.length)];
+  }
+
+  // Queue turns so fast double-taps (e.g. up then left) both register.
+  function turn(x, y) {
+    if (state !== 'playing') return;
+    const lastDir = queue.length ? queue[queue.length - 1] : dir;
+    if (lastDir.x === -x && lastDir.y === -y) return; // no reversing
+    if (lastDir.x === x && lastDir.y === y) return;
+    if (queue.length < 3) queue.push({x, y});
+  }
+
+  function tick() {
+    if (queue.length) dir = queue.shift();
+    prevSnake = snake.map(p => ({...p}));
+    const head = {x: snake[0].x + dir.x, y: snake[0].y + dir.y};
+
+    const hitWall = head.x < 0 || head.y < 0 || head.x >= GRID || head.y >= GRID;
+    const eating = head.x === food.x && head.y === food.y;
+    // The tail moves away this tick unless we're eating, so it's safe to enter.
+    const body = eating ? snake : snake.slice(0, -1);
+    const hitSelf = body.some(s => s.x === head.x && s.y === head.y);
+    if (hitWall || hitSelf) return gameOver();
+
+    snake.unshift(head);
+    if (eating) {
+      score++;
+      scoreEl.textContent = score;
+      step = Math.max(MIN_STEP, step - SPEEDUP);
+      eatPulse = 1;
+      prevSnake.push({...prevSnake[prevSnake.length - 1]}); // new tail grows in place
+      if (snake.length === GRID * GRID) return gameOver(true);
+      placeFood();
+    } else {
+      snake.pop();
+    }
+  }
+
+  function gameOver(won = false) {
+    state = 'over';
+    const isBest = score > best;
+    if (isBest) {
+      best = score;
+      bestEl.textContent = best;
+      try { localStorage.setItem('snake-lite-best', best); } catch {}
+    }
+    titleEl.textContent = won ? 'You filled the board!' : 'Game over';
+    msgEl.innerHTML = `Score: <b>${score}</b>` + (isBest && score > 0 ? ' · <span class="new-best">New best!</span>' : '');
+    playBtn.textContent = 'Play again';
+    overlay.classList.remove('hidden');
+  }
+
+  function start() {
+    reset();
+    state = 'playing';
+    overlay.classList.add('hidden');
+    last = performance.now();
+  }
+
+  function togglePause() {
+    if (state === 'playing') {
+      state = 'paused';
+      titleEl.textContent = 'Paused';
+      msgEl.textContent = 'Press Space or tap Resume';
+      playBtn.textContent = 'Resume';
+      overlay.classList.remove('hidden');
+    } else if (state === 'paused') {
+      state = 'playing';
+      overlay.classList.add('hidden');
+      last = performance.now();
+    }
+  }
+
+  // ---- rendering ----
+  function resize() {
+    const dpr = window.devicePixelRatio || 1;
+    const size = canvas.clientWidth;
+    canvas.width = canvas.height = Math.round(size * dpr);
+    ctx.setTransform(canvas.width / GRID, 0, 0, canvas.height / GRID, 0, 0); // 1 unit = 1 cell
+  }
+
+  function draw(t) {
+    ctx.clearRect(0, 0, GRID, GRID);
+
+    // checkerboard
+    ctx.fillStyle = C.grid;
+    for (let x = 0; x < GRID; x++)
+      for (let y = 0; y < GRID; y++)
+        if ((x + y) % 2) ctx.fillRect(x, y, 1, 1);
+
+    // food, gently pulsing
+    const pulse = 0.32 + Math.sin(performance.now() / 180) * 0.04;
+    ctx.fillStyle = C.food;
+    ctx.beginPath();
+    ctx.arc(food.x + .5, food.y + .5, pulse, 0, Math.PI * 2);
+    ctx.fill();
+
+    // snake: interpolate each segment between its previous and current cell
+    const pts = snake.map((s, i) => {
+      const p = prevSnake[i] || s;
+      return {x: p.x + (s.x - p.x) * t + .5, y: p.y + (s.y - p.y) * t + .5};
+    });
+    const width = 0.72 + eatPulse * 0.12;
+    ctx.lineCap = ctx.lineJoin = 'round';
+    ctx.strokeStyle = C.snake;
+    ctx.lineWidth = width;
+    ctx.beginPath();
+    pts.forEach((p, i) => i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y));
+    if (pts.length === 1) ctx.lineTo(pts[0].x, pts[0].y);
+    ctx.stroke();
+
+    // head + eyes
+    const h = pts[0];
+    ctx.fillStyle = C.head;
+    ctx.beginPath();
+    ctx.arc(h.x, h.y, width / 2 + .04, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#0f1115';
+    const ex = -dir.y * .17, ey = dir.x * .17;
+    for (const s of [1, -1]) {
+      ctx.beginPath();
+      ctx.arc(h.x + dir.x * .12 + ex * s, h.y + dir.y * .12 + ey * s, .07, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  function loop(now) {
+    if (state === 'playing') {
+      acc += now - last;
+      while (acc >= step && state === 'playing') { acc -= step; tick(); }
+    }
+    last = now;
+    eatPulse = Math.max(0, eatPulse - 0.08);
+    draw(state === 'playing' ? Math.min(acc / step, 1) : 1);
+    requestAnimationFrame(loop);
+  }
+
+  // ---- input ----
+  const KEYS = {
+    ArrowUp: [0, -1], KeyW: [0, -1], ArrowDown: [0, 1], KeyS: [0, 1],
+    ArrowLeft: [-1, 0], KeyA: [-1, 0], ArrowRight: [1, 0], KeyD: [1, 0],
+  };
+  addEventListener('keydown', e => {
+    if (KEYS[e.code]) { e.preventDefault(); turn(...KEYS[e.code]); }
+    else if (e.code === 'Space') {
+      e.preventDefault();
+      if (state === 'playing' || state === 'paused') togglePause();
+      else start();
+    } else if (e.code === 'Enter' && state !== 'playing') {
+      state === 'paused' ? togglePause() : start();
+    }
+  });
+
+  let touchStart = null;
+  addEventListener('touchstart', e => {
+    const t = e.touches[0];
+    touchStart = {x: t.clientX, y: t.clientY};
+  }, {passive: true});
+  addEventListener('touchmove', e => {
+    if (!touchStart) return;
+    const t = e.touches[0];
+    const dx = t.clientX - touchStart.x, dy = t.clientY - touchStart.y;
+    if (Math.max(Math.abs(dx), Math.abs(dy)) < 24) return;
+    Math.abs(dx) > Math.abs(dy) ? turn(Math.sign(dx), 0) : turn(0, Math.sign(dy));
+    touchStart = {x: t.clientX, y: t.clientY}; // allow chained swipes
+  }, {passive: true});
+  addEventListener('touchend', () => touchStart = null);
+
+  playBtn.addEventListener('click', () => state === 'paused' ? togglePause() : start());
+  addEventListener('blur', () => state === 'playing' && togglePause());
+  addEventListener('resize', resize);
+
+  reset();
+  state = 'menu';
+  resize();
+  last = performance.now();
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
